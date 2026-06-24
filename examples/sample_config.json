@@ -1,0 +1,5 @@
+{
+  "frost_risk": { "near_frost": 2.0 },
+  "livestock_thi": { "moderate": 70, "severe": 82 },
+  "insect_pests": { "base": 10.0 }
+}

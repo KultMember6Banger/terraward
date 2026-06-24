@@ -1,0 +1,20 @@
+name: security
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Static analysis (bandit)
+        run: |
+          pip install bandit
+          bandit -r terraward.py advisor.py
+      - name: Test suite
+        run: python -m unittest discover -v

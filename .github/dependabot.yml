@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # TerraWard has no runtime dependencies; this keeps the CI actions patched.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

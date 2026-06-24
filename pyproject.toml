@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terraward"
+version = "1.0.0"
+description = "A free, open, organic-first early-warning system for farmers, across land and sea."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "AGPL-3.0-only" }
+keywords = ["agriculture", "farming", "organic", "early-warning", "aquaculture", "decision-support"]
+authors = [{ name = "the TerraWard contributors" }]
+classifiers = [
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+    "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.scripts]
+terraward = "terraward:main"
+
+[tool.setuptools]
+py-modules = ["terraward"]

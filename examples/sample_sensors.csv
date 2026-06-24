@@ -1,0 +1,4 @@
+date,soil_moisture,soil_oxygen,soil_temp_min,dissolved_oxygen,chlorophyll,water_temp,salinity
+2026-06-15,8,18,13.5,,,,
+2026-06-19,52,7,14.0,,,,
+2026-06-20,,,,1.5,12,24,33

@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.db
+terraward_results.*
+build/
+dist/
+*.egg-info/
+.venv/
+
+# Claude Code local settings
+.claude/

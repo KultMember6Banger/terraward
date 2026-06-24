@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TerraWard</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; height:100%; background:#03050b; overflow:hidden; }
+  #sky { display:block; position:fixed; inset:0; width:100vw; height:100vh; }
+  #title {
+    position:fixed; left:0; right:0; top:50%; transform:translateY(-50%) scale(1.04);
+    text-align:center; pointer-events:none; opacity:0;
+    transition:opacity 2s cubic-bezier(.16,.7,.2,1), transform 2.2s cubic-bezier(.16,.7,.2,1);
+  }
+  #title.show { opacity:1; transform:translateY(-50%) scale(1); }
+  .tw {
+    font:200 clamp(40px,11vw,128px)/1 "Helvetica Neue",-apple-system,"Segoe UI",system-ui,sans-serif;
+    letter-spacing:.42em; margin-left:.42em; color:#f6f9ff;
+    text-shadow:0 0 30px rgba(255,206,128,.5), 0 0 110px rgba(130,185,255,.3);
+  }
+  @media (prefers-reduced-motion: reduce) { #title { transition:none; } }
+</style>
+</head>
+<body>
+<canvas id="sky"></canvas>
+<div id="title"><div class="tw">TERRAWARD</div></div>
+
+<script>
+(function(){
+  "use strict";
+  const cv = document.getElementById('sky'), ctx = cv.getContext('2d');
+  const titleEl = document.getElementById('title');
+  let W, H, DPR, BASE;
+  const clamp=(v,a,b)=>v<a?a:v>b?b:v, lerp=(a,b,t)=>a+(b-a)*t;
+  const easeIO=t=>t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
+  const easeIn=t=>t*t*t, easeOut=t=>1-Math.pow(1-t,3);
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---- seeded noise -> equirectangular planet + cloud textures (built once) ----
+  let seed=20260622; const rnd=()=>{seed=(seed*1664525+1013904223)%4294967296;return seed/4294967296;};
+  function hash(x,y){ let h=(x|0)*374761393+(y|0)*668265263; h=(h^(h>>13))*1274126177; return ((h^(h>>16))>>>0)/4294967296; }
+  function vnoise(x,y,P){
+    const ix=Math.floor(x), iy=Math.floor(y), fx=x-ix, fy=y-iy;
+    const sx=fx*fx*(3-2*fx), sy=fy*fy*(3-2*fy);
+    const wx0=((ix%P)+P)%P, wx1=((ix+1)%P+P)%P;
+    const a=hash(wx0,iy), b=hash(wx1,iy), c=hash(wx0,iy+1), d=hash(wx1,iy+1);
+    return lerp(lerp(a,b,sx), lerp(c,d,sx), sy);
+  }
+  function fbm(u,v,P,oct,off){
+    let e=0,amp=.5,f=1,norm=0;
+    for(let o=0;o<oct;o++){ e+=amp*vnoise(u*P*f+off, v*P*.5*f+off, Math.max(1,(P*f)|0)); norm+=amp; amp*=.5; f*=2; }
+    return e/norm;
+  }
+  const TW=1024, TH=512, base=new Uint8ClampedArray(TW*TH*4);   // RGB + A=shininess
+  const CW=512, CH=256, cloud=new Uint8Array(CW*CH);
+  function mix3(r1,g1,b1,r2,g2,b2,t){return [lerp(r1,r2,t),lerp(g1,g2,t),lerp(b1,b2,t)];}
+  function buildPlanet(){
+    for(let y=0;y<TH;y++){
+      const v=y/TH, lat=(v-.5)*Math.PI, al=Math.abs(lat);
+      for(let x=0;x<TW;x++){
+        const u=x/TW;
+        let e=fbm(u,v,6,5,0);
+        e=e*1.15-0.06+0.10*Math.cos(lat);          // a little more land near equator
+        const grain=(hash(x*3,y*3)-.5)*0.04;
+        let r,g,b,sh;
+        if(e<0.5){ const dp=clamp((0.5-e)/0.5,0,1); const c=mix3(43,118,168, 7,32,60, Math.pow(dp,.6)); r=c[0];g=c[1];b=c[2]; sh=255; }
+        else{
+          const ld=clamp((e-0.5)/0.5,0,1);
+          if(ld<0.06){ r=201;g=180;b=125; sh=120; }
+          else if(ld<0.55){ const c=mix3(60,124,54, 44,96,40, ld/0.55); r=c[0];g=c[1];b=c[2]; sh=40; }
+          else if(ld<0.78){ const c=mix3(110,98,66, 138,128,112,(ld-.55)/.23); r=c[0];g=c[1];b=c[2]; sh=50; }
+          else{ const c=mix3(170,166,150, 236,240,244,(ld-.78)/.22); r=c[0];g=c[1];b=c[2]; sh=80; }
+          r+=grain*120;g+=grain*120;b+=grain*120;
+        }
+        const ice=clamp((al-1.18)/0.28,0,1)*clamp(0.55+e,0,1);     // polar caps
+        if(ice>0){ r=lerp(r,235,ice); g=lerp(g,242,ice); b=lerp(b,248,ice); sh=lerp(sh,90,ice); }
+        const i=(y*TW+x)<<2; base[i]=r; base[i+1]=g; base[i+2]=b; base[i+3]=sh;
+      }
+    }
+  }
+  function buildClouds(){
+    for(let y=0;y<CH;y++){ const v=y/CH, band=0.6+0.4*Math.abs(Math.sin(v*Math.PI*3));
+      for(let x=0;x<CW;x++){ const u=x/CW; let d=fbm(u,v,5,5,113.7)*band; const a=clamp((d-0.52)/0.2,0,1); cloud[y*CW+x]=(a*a*210)|0; } }
+  }
+
+  // ---- sphere geometry + per-pixel lighting (rebuilt on resize) ----
+  const L=(function(){const x=-0.6,y=0.5,z=0.62,m=Math.hypot(x,y,z);return{x:x/m,y:y/m,z:z/m};})();
+  const Hh=(function(){const x=L.x,y=L.y,z=L.z+1,m=Math.hypot(x,y,z);return{x:x/m,y:y/m,z:z/m};})();
+  let D=0, ecan=document.createElement('canvas'), ectx=ecan.getContext('2d'), eimg=null, edata=null;
+  let cov,lon0,brow,crow,li,specG,rimR,rimG,rimB,clit;
+  const INV2PI=1/(Math.PI*2);
+  function buildSphere(nd){
+    D=nd; ecan.width=ecan.height=D; eimg=ectx.createImageData(D,D); edata=eimg.data;
+    const N=D*D; cov=new Float32Array(N); lon0=new Float32Array(N);
+    brow=new Int32Array(N); crow=new Int32Array(N);
+    li=new Float32Array(N); specG=new Float32Array(N);
+    rimR=new Float32Array(N); rimG=new Float32Array(N); rimB=new Float32Array(N); clit=new Float32Array(N);
+    const R=D/2;
+    for(let y=0;y<D;y++) for(let x=0;x<D;x++){
+      const i=y*D+x, dx=(x+0.5-R)/R, dy=(y+0.5-R)/R, r2=dx*dx+dy*dy;
+      const dist=Math.sqrt(r2)*R, c=clamp(R-dist+0.5,0,1);
+      if(c<=0){ cov[i]=0; continue; }
+      cov[i]=c;
+      const nx=dx, ny=-dy, nz=Math.sqrt(Math.max(0,1-r2));
+      const lat=Math.asin(clamp(ny,-1,1)), v=lat/Math.PI+0.5;
+      lon0[i]=Math.atan2(nx,nz);
+      brow[i]=clamp((v*TH)|0,0,TH-1); crow[i]=clamp((v*CH)|0,0,CH-1);
+      const diff=clamp(nx*L.x+ny*L.y+nz*L.z,0,1);
+      li[i]=0.07+0.97*diff;
+      const hn=clamp(nx*Hh.x+ny*Hh.y+nz*Hh.z,0,1);
+      specG[i]=Math.pow(hn,26)*1.3;
+      const rim=Math.pow(1-nz,3)*clamp(diff+0.32,0,1);
+      rimR[i]=rim*70; rimG[i]=rim*150; rimB[i]=rim*235;
+      clit[i]=clamp(0.12+0.95*diff,0,1.15);
+    }
+  }
+
+  function resize(){
+    DPR=Math.min(window.devicePixelRatio||1,2);
+    W=cv.width=Math.floor(innerWidth*DPR); H=cv.height=Math.floor(innerHeight*DPR);
+    cv.style.width=innerWidth+'px'; cv.style.height=innerHeight+'px'; BASE=Math.min(W,H);
+    const nd=clamp(Math.round(BASE*0.62),320,640); if(nd!==D) buildSphere(nd);
+  }
+
+  // ---- stars (with depth, colour, motion streaks) ----
+  const stars=[];
+  for(let i=0;i<420;i++){ const a=rnd()*6.2832, r=Math.pow(rnd(),.5), t=rnd();
+    stars.push({x:Math.cos(a)*r, y:Math.sin(a)*r, d:0.22+rnd()*0.78, tw:rnd()*6.28,
+      c: t<.7?'#e6edff': t<.85?'#fff0d8':'#d8e6ff'}); }
+  const planets=[{o:.15,r:3.2,c:'#b9b1a1',s:1.7,p:.4},{o:.25,r:4.8,c:'#cda76d',s:1.1,p:2.1},
+                 {o:.37,r:5.2,c:'#6f93cb',s:.8,p:4.0},{o:.50,r:4.2,c:'#c2744c',s:.6,p:5.3}];
+
+  function drawStars(zoom,stream,dim,now){
+    ctx.lineCap='round';
+    for(const s of stars){
+      const R=s.d*BASE*0.8*zoom, px=W/2+s.x*R, py=H/2+s.y*R;
+      if(px<-30||px>W+30||py<-30||py>H+30) continue;
+      const tw=0.5+0.5*Math.sin(s.tw+now*0.002), a=tw*(dim?0.5:0.95);
+      ctx.globalAlpha=a; ctx.strokeStyle=s.c;
+      if(stream>0.03){ const k=0.03+0.16*stream, ix=W/2+s.x*R*(1-k), iy=H/2+s.y*R*(1-k);
+        ctx.lineWidth=(s.d*1.3+0.4)*DPR; ctx.beginPath(); ctx.moveTo(ix,iy); ctx.lineTo(px,py); ctx.stroke();
+      } else { const sz=(s.d*1.4+0.5)*DPR; ctx.fillStyle=s.c; ctx.fillRect(px,py,sz,sz); }
+    }
+    ctx.globalAlpha=1;
+  }
+  function drawPlanets(t,zoom,fade){
+    const X=W/2,Y=H/2; ctx.globalAlpha=1-fade;
+    for(const p of planets){ const a=p.p+t*p.s*0.5, px=X+Math.cos(a)*p.o*BASE*zoom, py=Y+Math.sin(a)*p.o*BASE*0.42*zoom, rr=p.r*DPR*Math.max(.5,zoom*.5);
+      ctx.fillStyle=p.c; ctx.beginPath(); ctx.arc(px,py,rr,0,7); ctx.fill();
+      ctx.globalAlpha=(1-fade)*0.45; ctx.fillStyle='#05060c'; ctx.beginPath(); ctx.arc(px+rr*.35,py-rr*.2,rr*.95,0,7); ctx.fill(); ctx.globalAlpha=1-fade; }
+    ctx.globalAlpha=1;
+  }
+  function drawSunWide(R){ const X=W/2,Y=H/2,g=ctx.createRadialGradient(X,Y,0,X,Y,R*4.2);
+    g.addColorStop(0,'rgba(255,251,238,1)'); g.addColorStop(.09,'rgba(255,219,128,.92)');
+    g.addColorStop(.3,'rgba(255,152,62,.42)'); g.addColorStop(1,'rgba(255,140,40,0)');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H); ctx.fillStyle='#fff8e9'; ctx.beginPath(); ctx.arc(X,Y,R,0,7); ctx.fill(); }
+  function drawSunGlow(intn){ const sx=W*0.18,sy=H*0.2,R=BASE*0.6,g=ctx.createRadialGradient(sx,sy,0,sx,sy,R);
+    g.addColorStop(0,'rgba(255,252,236,'+(.95*intn)+')'); g.addColorStop(.13,'rgba(255,215,128,'+(.72*intn)+')');
+    g.addColorStop(.5,'rgba(255,150,60,'+(.2*intn)+')'); g.addColorStop(1,'rgba(255,140,40,0)');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H); ctx.fillStyle='rgba(255,253,244,'+intn+')'; ctx.beginPath(); ctx.arc(sx,sy,BASE*0.052,0,7); ctx.fill(); }
+
+  function renderEarth(Rdisp, rot){
+    const rotC=rot*1.12;
+    for(let i=0,p=0;i<cov.length;i++,p+=4){
+      const c=cov[i]; if(c<=0){ edata[p+3]=0; continue; }
+      let uf=(lon0[i]+rot)*INV2PI; uf-=Math.floor(uf); const ux=(uf*TW)|0;
+      const ti=(brow[i]*TW+ux)<<2, l=li[i], sp=specG[i]*(base[ti+3]/255)*255;
+      let R=base[ti]*l+sp+rimR[i], G=base[ti+1]*l+sp+rimG[i], B=base[ti+2]*l+sp+rimB[i];
+      let cf=(lon0[i]+rotC)*INV2PI; cf-=Math.floor(cf); const cx=(cf*CW)|0;
+      const ca=cloud[crow[i]*CW+cx]/255;
+      if(ca>0){ const cl=clit[i]*255; R=R*(1-ca)+cl*ca; G=G*(1-ca)+cl*ca; B=B*(1-ca)+cl*ca; }
+      edata[p]=R; edata[p+1]=G; edata[p+2]=B; edata[p+3]=c*255;
+    }
+    ectx.putImageData(eimg,0,0);
+    const X=W/2, Y=H*0.62;
+    const ag=ctx.createRadialGradient(X,Y,Rdisp*0.9,X,Y,Rdisp*1.5);
+    ag.addColorStop(0,'rgba(120,195,255,0.3)'); ag.addColorStop(0.6,'rgba(110,180,255,0.12)'); ag.addColorStop(1,'rgba(110,180,255,0)');
+    ctx.fillStyle=ag; ctx.beginPath(); ctx.arc(X,Y,Rdisp*1.5,0,7); ctx.fill();
+    ctx.drawImage(ecan, X-Rdisp, Y-Rdisp, Rdisp*2, Rdisp*2);
+  }
+  function vignette(){ const g=ctx.createRadialGradient(W/2,H*0.52,BASE*0.18,W/2,H*0.52,BASE*0.92);
+    g.addColorStop(0,'rgba(0,0,0,0)'); g.addColorStop(1,'rgba(0,0,7,0.6)'); ctx.fillStyle=g; ctx.fillRect(0,0,W,H); }
+
+  const T_ZOOM=2.2, T_EARTH=4.8, T_TITLE=6.9;
+  let start=performance.now(), shown=false;
+  function showTitle(){ if(!shown){ shown=true; titleEl.classList.add('show'); } }
+  function skip(){ if((performance.now()-start)/1000<T_TITLE) start=performance.now()-(T_TITLE+0.3)*1000; }
+  addEventListener('click',skip); addEventListener('keydown',skip); addEventListener('resize',resize);
+
+  function frame(now){
+    const t=(now-start)/1000, rot=now*0.00028;
+    ctx.fillStyle='#03050b'; ctx.fillRect(0,0,W,H);
+    if(t<T_EARTH){
+      const zp=easeIn(clamp((t-T_ZOOM)/(T_EARTH-T_ZOOM),0,1)), cam=lerp(1,7.5,zp);
+      drawStars(cam,zp,false,now); drawPlanets(t,cam,zp); drawSunWide(lerp(BASE*0.045,BASE*1.0,zp));
+      const fl=clamp((t-(T_EARTH-0.7))/0.7,0,1); if(fl>0){ ctx.fillStyle='rgba(255,251,242,'+fl+')'; ctx.fillRect(0,0,W,H); }
+    } else {
+      const ep=easeOut(clamp((t-T_EARTH)/2.0,0,1));
+      drawStars(1,0,true,now); drawSunGlow(clamp(0.55+ep*0.45,0,1));
+      renderEarth(lerp(BASE*0.05,BASE*0.28,ep), rot);
+      const fo=1-clamp((t-T_EARTH)/0.65,0,1); if(fo>0){ ctx.fillStyle='rgba(255,251,242,'+fo+')'; ctx.fillRect(0,0,W,H); }
+      if(t>=T_TITLE) showTitle();
+    }
+    vignette();
+    requestAnimationFrame(frame);
+  }
+
+  buildPlanet(); buildClouds(); resize();
+  if(reduce){ start=performance.now()-(T_TITLE+1)*1000; ctx.fillStyle='#03050b'; ctx.fillRect(0,0,W,H);
+    drawStars(1,0,true,0); drawSunGlow(1); renderEarth(BASE*0.28,0.6); vignette(); showTitle(); }
+  else requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

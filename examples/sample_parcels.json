@@ -1,0 +1,37 @@
+{
+  "farm": "De Groene Hoeve",
+  "parcels": [
+    {
+      "name": "Home potatoes",
+      "lat": 50.9393, "lon": 4.3266,
+      "modules": ["late_blight", "insect_pests", "heat_stress", "wind_conditions",
+                  "evapotranspiration", "manure_spreading", "treatment_window"],
+      "pests": ["colorado_potato_beetle"]
+    },
+    {
+      "name": "River brassicas",
+      "lat": 50.9510, "lon": 4.3100,
+      "modules": ["insect_pests", "heat_stress", "evapotranspiration", "treatment_window"],
+      "pests": ["cabbage_root_fly"]
+    },
+    {
+      "name": "Hill orchard",
+      "place": "Meise",
+      "modules": ["scab_risk", "insect_pests", "frost_risk", "pollinators", "treatment_window"],
+      "pests": ["codling_moth"],
+      "bees": ["honeybee", "bumblebee"]
+    },
+    {
+      "name": "Dairy pasture",
+      "lat": 50.9300, "lon": 4.3500,
+      "modules": ["livestock_thi", "cold_stress", "heat_stress"],
+      "livestock": ["dairy_cattle"]
+    },
+    {
+      "name": "Coast trout pond",
+      "lat": 51.2000, "lon": 2.9200,
+      "modules": ["marine_conditions"],
+      "aquaculture": ["trout"]
+    }
+  ]
+}
