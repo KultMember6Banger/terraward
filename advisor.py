@@ -61,6 +61,7 @@ def _t(key: str, lang: str) -> str:
 
 LABELS = {
     "late_blight": "Potato late blight", "scab_risk": "Apple scab",
+    "downy_mildew": "Grape downy mildew",
     "frost_risk": "Frost / cold", "heat_stress": "Crop heat stress",
     "cold_stress": "Cold stress", "wind_conditions": "Wind",
     "livestock_thi": "Livestock heat stress", "pollinators": "Pollination window",

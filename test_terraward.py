@@ -18,7 +18,26 @@ class TestDataLayer(unittest.TestCase):
         d = days[0]
         self.assertEqual(d.humid_hours, 8)
         self.assertEqual(d.leaf_wet_hours, 8)
+        self.assertEqual(d.max_wet_run, 8)  # hours 0-7 form one unbroken wet run
         self.assertAlmostEqual(d.precip_mm, 1.0)
+
+    def test_wet_run_spans_midnight(self):
+        # A wet spell from 20:00 day1 through 05:00 day2 (10 unbroken hours) must register as one
+        # 10h run, not fragment into 4h + 6h below the scab/blight thresholds on each calendar day.
+        hourly = []
+        for h in range(24):
+            wet = h >= 20  # 20:00-23:00 wet on day 1
+            hourly.append((f"2026-06-01T{h:02d}:00", 18.0, 95.0 if wet else 60.0, 0.0, 5.0))
+        for h in range(24):
+            wet = h < 6   # 00:00-05:00 wet on day 2
+            hourly.append((f"2026-06-02T{h:02d}:00", 18.0, 95.0 if wet else 60.0, 0.0, 5.0))
+        days = fre._summarise(hourly)
+        # day1 sees the run reach 4h by 23:00; day2 sees it continue to 10h by 05:00.
+        self.assertEqual(days[0].leaf_wet_hours, 4)
+        self.assertEqual(days[1].leaf_wet_hours, 6)
+        self.assertEqual(days[1].max_wet_run, 10)  # the unbroken run is recovered, not fragmented
+        # and scab now fires on day2 (10h continuous at 18C >= 9h light), which per-day counting missed
+        self.assertTrue(any(al.date == "2026-06-02" for al in fre.scab_risk(days)))
 
 
 class TestThi(unittest.TestCase):
@@ -66,10 +85,25 @@ class TestThresholdModules(unittest.TestCase):
         self.assertEqual(fre.soil_conditions([ds(soil_moisture=5)])[0].severity, Severity.DANGER)
         self.assertEqual(fre.soil_conditions([ds(soil_moisture=8)])[0].severity, Severity.WARNING)
 
+    def test_soil_temperature(self):
+        # frozen root zone -> DANGER; cold-but-thawed -> WATCH (too cold to sow); cool -> INFO.
+        # (a latest-sensors summary INFO is always emitted too, so match on the temp wording.)
+        def temp_alert(t):
+            return [a for a in fre.soil_conditions([ds(soil_temp_min=t)])
+                    if "soil" in a.message.lower() and ("germinat" in a.message.lower()
+                    or "freezing" in a.message.lower() or "Cold soil" in a.message)]
+        self.assertEqual(temp_alert(-1)[0].severity, Severity.DANGER)
+        self.assertEqual(temp_alert(3)[0].severity, Severity.WATCH)
+        self.assertEqual(temp_alert(8)[0].severity, Severity.INFO)
+        self.assertEqual(temp_alert(15), [])  # warm: no soil-temp alert (summary INFO aside)
+
     def test_pollinators(self):
         self.assertEqual(fre.pollinators([ds(tmax=10)])[0].severity, Severity.WARNING)
         self.assertEqual(fre.pollinators([ds(tmax=16)])[0].severity, Severity.WATCH)
-        self.assertEqual(fre.pollinators([ds(tmax=20)]), [])
+        # a warm, calm, dry day is now surfaced as a positive INFO good-foraging window
+        good = fre.pollinators([ds(tmax=20)])
+        self.assertEqual(good[0].severity, Severity.INFO)
+        self.assertIn("Good foraging window", good[0].message)
         self.assertEqual(fre.pollinators([ds(tmax=20, precip_mm=5)])[0].severity, Severity.WARNING)
 
 
@@ -325,7 +359,9 @@ class TestPollinatorSpecies(unittest.TestCase):
 
     def test_unknown_species_falls_back_to_honeybee(self):
         fre.KEPT_POLLINATORS[:] = ["nonsense"]
-        self.assertEqual(fre.pollinators([ds(tmax=20)]), [])   # 20C fine for honeybee
+        a = fre.pollinators([ds(tmax=20)])   # 20C fine for honeybee -> good-window INFO
+        self.assertEqual(a[0].severity, Severity.INFO)
+        self.assertIn("honeybees", a[0].message)
 
 
 class TestUnits(unittest.TestCase):
@@ -386,6 +422,22 @@ class TestLivestockSpecies(unittest.TestCase):
         fre.KEPT_LIVESTOCK[:] = ["dairy_cattle"]
         self.assertEqual(fre.livestock_thi([ds(tmax=33, mean_rh=66)])[0].severity, Severity.DANGER)
         self.assertEqual(fre.livestock_thi([ds(tmax=18, mean_rh=50)]), [])
+
+    def test_poultry_uses_degc_scale_not_cattle_thi(self):
+        # Poultry are graded on the degC poultry index (onset ~28C), reported separately, and the
+        # message must NOT claim the cattle NRC THI. At ~31C it is moderate; mild heat is clear.
+        fre.KEPT_LIVESTOCK[:] = ["poultry"]
+        hot = fre.livestock_thi([ds(tmax=31, tmean=28, mean_rh=60)])
+        self.assertTrue(hot and hot[0].severity >= Severity.WARNING)
+        self.assertIn("poultry index", hot[0].message)
+        self.assertNotIn("(THI ", hot[0].message)  # not the cattle scale
+        self.assertEqual(fre.livestock_thi([ds(tmax=24, tmean=20, mean_rh=50)]), [])  # comfortable
+
+    def test_pig_onset_matches_st_pierre(self):
+        # St-Pierre (2003) grow-finish hog onset THI = 72 -> mild watch right at the published onset
+        fre.KEPT_LIVESTOCK[:] = ["pig"]
+        a = fre.livestock_thi([ds(tmax=33, mean_rh=66)])  # THI ~ 80 -> severe
+        self.assertTrue(a and a[0].severity == Severity.DANGER)
 
 
 class TestManureSpreading(unittest.TestCase):
@@ -470,6 +522,26 @@ class TestAquacultureSpecies(unittest.TestCase):
         self.assertIn(Severity.DANGER, sev)
         self.assertEqual(
             fre.marine_conditions([ds(dissolved_oxygen=3.0)])[0].severity, Severity.WARNING)
+
+    def test_turnover_risk_on_warm_pond_heavy_rain(self):
+        fre.KEPT_AQUACULTURE[:] = ["mixed"]
+        a = fre.marine_conditions([ds(water_temp=26, precip_mm=30)])  # warm + heavy rain
+        self.assertTrue(any("turnover" in x.message.lower() and x.severity >= Severity.WARNING
+                            for x in a))
+        # a cool pond with the same rain does NOT raise turnover (not stratified)
+        b = fre.marine_conditions([ds(water_temp=15, precip_mm=30)])
+        self.assertFalse(any("turnover" in x.message.lower() for x in b))
+
+    def test_do_saturation_and_below_optimum(self):
+        fre.KEPT_AQUACULTURE[:] = ["mixed"]
+        # DO read against solubility ceiling when water_temp known
+        msg = fre.marine_conditions([ds(dissolved_oxygen=3.0, water_temp=30)])[0].message
+        self.assertIn("saturation", msg.lower())
+        # warm-water species: DO above its stress floor but below the 5 mg/L optimum -> WATCH
+        fre.KEPT_AQUACULTURE[:] = ["carp"]
+        watch = [x for x in fre.marine_conditions([ds(dissolved_oxygen=4.5)])
+                 if "below optimum" in x.message]
+        self.assertTrue(watch and watch[0].severity == Severity.WATCH)
 
 
 class TestEvapotranspiration(unittest.TestCase):
@@ -618,6 +690,24 @@ class TestDigest(unittest.TestCase):
                   fre.Alert("livestock_thi", Severity.DANGER, "cattle", date="2026-06-01")]
         out = fre.render_digest("X", 0, 0, days, ["heat_stress"], alerts, demo=True)
         self.assertIn("2 concern(s)", out)        # different modules are not collapsed
+
+
+class TestDownyMildew(unittest.TestCase):
+    def test_secondary_infection_warning(self):
+        # mild (20C) + a wet period + rain -> secondary-cycle WARNING
+        a = fre.downy_mildew([ds(tmean=20, leaf_wet_hours=8, precip_mm=2)])
+        self.assertTrue(a and a[0].severity == Severity.WARNING)
+        self.assertIn("secondary", a[0].message.lower())
+
+    def test_primary_3_10_watch(self):
+        # 3-10 weather (>=10C, >=10mm) but no wet-period/secondary -> primary WATCH
+        a = fre.downy_mildew([ds(tmean=12, leaf_wet_hours=0, precip_mm=12)])
+        self.assertTrue(a and a[0].severity == Severity.WATCH)
+        self.assertIn("primary", a[0].message.lower())
+
+    def test_cold_or_dry_clear(self):
+        self.assertEqual(fre.downy_mildew([ds(tmean=8, precip_mm=12)]), [])    # too cold for 3-10
+        self.assertEqual(fre.downy_mildew([ds(tmean=20, precip_mm=0)]), [])    # dry: no infection
 
 
 class TestScabRisk(unittest.TestCase):

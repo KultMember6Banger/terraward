@@ -122,7 +122,9 @@ DEFAULT_CONFIG: Dict[str, dict] = {
     "late_blight": {"min_temp": 10.0, "hutton_humid_hours": 6, "smith_humid_hours": 11,
                     "leaf_wet_corroborate": 10},
     "scab_risk": {"upper_temp": 26.0},
-    "frost_risk": {"frost": 0.0, "near_frost": 3.0},
+    "downy_mildew": {"primary_temp": 10.0, "primary_rain": 10.0, "secondary_temp_min": 13.0,
+                     "secondary_temp_max": 30.0, "secondary_wet_hours": 4.0},
+    "frost_risk": {"hard_frost": -2.0, "frost": 0.0, "near_frost": 3.0},
     "heat_stress": {"extreme": 32.0, "high": 28.0},
     "cold_stress": {"livestock_severe": -15.0, "livestock_warning": -5.0,
                     "wet_precip": 1.0, "wet_warning": 12.0, "wet_severe": 2.0},
@@ -131,23 +133,24 @@ DEFAULT_CONFIG: Dict[str, dict] = {
     "manure_spreading": {"rain_ahead": 10.0, "rain_ahead_heavy": 20.0, "good_ahead_max": 3.0,
                          "saturated_recent": 25.0, "frozen_min": 0.0, "uptake_temp": 6.0,
                          "ammonia_wind": 20.0, "sat_moisture": 80.0},
-    "evapotranspiration": {"deficit_watch": 20.0, "deficit_warning": 35.0},
+    "evapotranspiration": {"deficit_watch": 20.0, "deficit_warning": 35.0, "kc": 1.0},
     "treatment_window": {"rain_today": 1.0, "rain_next": 5.0, "wind_max": 20.0,
                          "heat_caution": 28.0},
-    "pollinators": {"cold_floor": 12.8, "good_temp": 18.0, "hot_ceiling": 32.0,
-                    "rain_mm": 1.0, "wind_stop": 24.0},
+    "pollinators": {"rain_mm": 1.0},  # temp/wind thresholds are per-species in POLLINATOR_PROFILES
     "soil_conditions": {"waterlogged": 50.0, "wet": 40.0, "severe_drought": 7.0,
                         "drought": 12.0, "low_o2": 8.0, "reduced_o2": 12.0,
                         "ph_acidic": 5.5, "ph_low": 6.0, "ph_high": 7.3, "ph_alkaline": 7.8,
                         "n_low": 10.0, "p_low": 20.0, "p_excess": 50.0, "k_low": 80.0,
-                        "ec_high": 2.0, "ec_severe": 4.0, "om_low": 3.0},
+                        "ec_high": 2.0, "ec_severe": 4.0, "om_low": 3.0,
+                        "soil_frozen": 0.0, "soil_cold_sow": 5.0, "soil_warm_sow": 10.0},
     "insect_pests": {"base": 10.0,
                      "milestones": [[50, "early development"],
                                     [220, "likely egg hatch / first activity"],
                                     [450, "peak activity / next generation"]]},
     "growing_degree_days": {"base": 5.0},
-    "marine_conditions": {"do_lethal": 2.0, "do_low": 4.0, "chl_severe": 10.0,
+    "marine_conditions": {"do_lethal": 2.0, "do_low": 4.0, "do_optimum": 5.0, "chl_severe": 10.0,
                           "chl_elevated": 3.0, "warm_water": 23.0,
+                          "turnover_rain": 25.0, "turnover_temp_drop": 5.0,
                           "ammonia_warn": 0.25, "ammonia_danger": 1.0,
                           "nitrite_warn": 0.1, "nitrite_danger": 1.0,
                           "nitrate_watch": 50.0, "nitrate_high": 100.0,
@@ -221,8 +224,12 @@ class DaySummary:
     mean_temp: float
     humid_hours: int
     mean_rh: float = 0.0
+    thi_max: Optional[float] = None  # daily-max THI from COINCIDENT hourly temp+RH (None if not from hourly data)
     precip_mm: float = 0.0
     leaf_wet_hours: int = 0
+    # Longest CONTIGUOUS leaf-wet run (hours) tracked across midnight, so a wet spell spanning
+    # calendar days isn't fragmented below disease thresholds. None when not built from hourly data.
+    max_wet_run: Optional[int] = None
     max_wind: Optional[float] = None
     mean_wind: Optional[float] = None
     # soil sensors
@@ -248,20 +255,34 @@ class DaySummary:
 
 
 def _summarise(hourly: List[tuple]) -> List[DaySummary]:
+    # Sort chronologically first so contiguous leaf-wetness runs can be tracked ACROSS calendar-day
+    # boundaries -- a wet spell from late evening into the next morning is one infection event, not
+    # two fragments. Without this, a 10h overnight wetting splits into (say) 4h + 6h and slips under
+    # the scab/blight thresholds on both days, silently missing a real infection period.
+    hourly = sorted(hourly, key=lambda x: x[0])
+    run = 0
+    run_at: List[int] = []
+    for _t, _temp, rh, pr, _wind in hourly:
+        run = run + 1 if (rh >= 90.0 or pr > 0.0) else 0
+        run_at.append(run)  # length of the unbroken wet run ENDING at this hour
     by_day: Dict[str, List[tuple]] = defaultdict(list)
-    for t, temp, rh, pr, wind in hourly:
-        by_day[t[:10]].append((temp, rh, pr, wind))
+    for (t, temp, rh, pr, wind), wr in zip(hourly, run_at):
+        by_day[t[:10]].append((temp, rh, pr, wind, wr))
     days: List[DaySummary] = []
     for d in sorted(by_day):
-        temps = [x[0] for x in by_day[d]]
-        hums = [x[1] for x in by_day[d]]
-        precs = [x[2] for x in by_day[d]]
-        winds = [x[3] for x in by_day[d] if x[3] is not None]
+        rows = by_day[d]
+        temps = [x[0] for x in rows]
+        hums = [x[1] for x in rows]
+        precs = [x[2] for x in rows]
+        winds = [x[3] for x in rows if x[3] is not None]
+        runs = [x[4] for x in rows]
         leaf_wet = sum(1 for rh, pr in zip(hums, precs) if rh >= 90.0 or pr > 0.0)
         days.append(DaySummary(d, min(temps), max(temps), sum(temps) / len(temps),
                                sum(1 for h in hums if h >= 90.0),
                                mean_rh=sum(hums) / len(hums),
+                               thi_max=max((_thi(tp, rh) for tp, rh in zip(temps, hums)), default=None),
                                precip_mm=sum(precs), leaf_wet_hours=leaf_wet,
+                               max_wet_run=(max(runs) if runs else 0),
                                max_wind=(max(winds) if winds else None),
                                mean_wind=(sum(winds) / len(winds) if winds else None)))
     return days
@@ -450,6 +471,7 @@ def module(key, description):
 
 def _thi(temp_c: float, rh_pct: float) -> float:
     """NRC Temperature-Humidity Index."""
+    rh_pct = max(0.0, min(100.0, rh_pct))  # guard bad sensor data (RH must be 0-100, not a 0-1 fraction)
     return (1.8 * temp_c + 32) - (0.55 - 0.0055 * rh_pct) * (1.8 * temp_c - 26)
 
 
@@ -460,6 +482,45 @@ def _wind_chill(temp_c: float, wind_kmh: Optional[float]) -> float:
         return temp_c
     v = wind_kmh ** 0.16
     return 13.12 + 0.6215 * temp_c - 11.37 * v + 0.3965 * temp_c * v
+
+
+def _nh3_fraction(temp_c: float, ph: float) -> float:
+    """Un-ionized ammonia (NH3) fraction of total ammonia (TAN), per Emerson et al. (1975).
+    NH3 is the toxic form; its share of TAN rises ~10x per pH unit and with temperature."""
+    pka = 0.09018 + 2729.92 / (temp_c + 273.15)
+    return 1.0 / (1.0 + 10 ** (pka - ph))
+
+
+def _wet_bulb(temp_c: float, rh_pct: float) -> float:
+    """Wet-bulb temperature (C) from dry-bulb + RH, Stull (2011) empirical approximation.
+    Valid ~ -20..50C, RH 5-99%; good to ~+/-1C at sea-level pressure. Stdlib-only (no psychro
+    tables), which is why it is used here for the poultry heat index below."""
+    rh = max(1.0, min(100.0, rh_pct))
+    return (temp_c * math.atan(0.151977 * math.sqrt(rh + 8.313659))
+            + math.atan(temp_c + rh) - math.atan(rh - 1.676331)
+            + 0.00391838 * rh ** 1.5 * math.atan(0.023101 * rh) - 4.686035)
+
+
+def _poultry_thi(temp_c: float, rh_pct: float) -> float:
+    """Poultry temperature-humidity index (degC scale): THI = 0.85*Tdb + 0.15*Twb (Tao & Xin
+    2003 / broiler thermal-comfort form). This is a DIFFERENT scale from the cattle NRC THI in
+    _thi() -- birds cannot sweat and the published thresholds are in degC, so the two indices
+    must not be compared. Air velocity (which lowers effective load) is omitted, so still-air is
+    assumed: the conservative, slightly over-warning direction for a free farmer tool."""
+    return 0.85 * temp_c + 0.15 * _wet_bulb(temp_c, rh_pct)
+
+
+def _do_saturation(temp_c: float, salinity_psu: Optional[float]) -> float:
+    """Dissolved-oxygen solubility (mg/L) at 100% saturation for the given water temperature and
+    salinity, via the Weiss (1970) equation (Benson & Krause coefficients). Warmer AND saltier
+    water holds less oxygen, so the same mg/L reading sits closer to the lethal floor in a warm or
+    brackish pond -- this lets a raw DO be read as a percent of what the water can actually hold."""
+    s = max(0.0, salinity_psu or 0.0)
+    tk = temp_c + 273.15
+    ln_ml = (-173.4292 + 249.6339 * (100.0 / tk) + 143.3483 * math.log(tk / 100.0)
+             - 21.8492 * (tk / 100.0)
+             + s * (-0.033096 + 0.014259 * (tk / 100.0) - 0.0017000 * (tk / 100.0) ** 2))
+    return math.exp(ln_ml) * 1.42905  # mL/L -> mg/L for O2
 
 
 # ============================================================================
@@ -600,16 +661,23 @@ def late_blight(days: List[DaySummary]) -> List[Alert]:
     return alerts
 
 
-# Revised Mills table (MacHardy & Gadoury 1989), banded by average temperature during the wet
-# period -> minimum continuous leaf-wetness hours for LIGHT / MODERATE / SEVERE ascospore
-# infection by Venturia inaequalis. Light = minimum for any infection; moderate/severe = the
-# wetness that drives a marked rise in lesions. Anchored to published values: ~9h (light) at
-# 16-24C, mid-teens at 6-9C, and >2 days required below 6C. This is a banded simplification for
-# daily data; the true model uses hourly temperature over a rain-triggered wet period.
+# Revised Mills criteria (Mills 1944; MacHardy & Gadoury 1989), banded by average temperature
+# during the wet period -> minimum continuous leaf-wetness hours for LIGHT / MODERATE / SEVERE(heavy)
+# ascospore infection by Venturia inaequalis (light <10%, moderate 10-40%, heavy >40% foliage
+# scabbed; Schwabe 1980). Light = minimum for any infection; severe = the wetness that drives a
+# heavy lesion load. The COLD bands (0-13C) are finely split and set to the published Mills-Jones
+# hour values (New England Tree Fruit Management Guide / netreefruit.org, reproducing MacHardy &
+# Gadoury 1989): wetness requirements rise STEEPLY as temperature falls (light ~21h at 6C but ~48h
+# near freezing), so the old single 0-6C band fit poorly -- too eager when cold, too slow at the
+# warm edge. Still a daily-resolution simplification; the true model integrates hourly temperature
+# over a rain-triggered wet period. Verified against the published table 2026-06-26.
 SCAB_MILLS = [   # (temp_low, temp_high, light, moderate, severe) hours of leaf wetness
-    (0.0,  6.0,  30.0, 40.0, 48.0),   # below 6C: Mills says >2 days, lab data sparse -> very long
-    (6.0,  10.0, 15.0, 21.0, 28.0),
-    (10.0, 13.0, 12.0, 17.0, 23.0),
+    (0.0,  2.5,  48.0, 72.0, 96.0),   # 32-36F: near-freezing, very long wetness needed (Mills-Jones)
+    (2.5,  4.5,  33.0, 45.0, 60.0),   # ~37-40F
+    (4.5,  6.0,  23.0, 33.0, 50.0),   # ~41-43F
+    (6.0,  8.0,  17.0, 26.0, 40.0),   # ~43-46F
+    (8.0,  10.0, 15.0, 20.0, 30.0),   # ~47-50F
+    (10.0, 13.0, 12.0, 17.0, 25.0),   # ~50-55F
     (13.0, 16.0, 10.0, 14.0, 20.0),
     (16.0, 24.0,  9.0, 13.0, 18.0),   # optimum: shortest wetness needed (~9h light)
     (24.0, 26.0, 11.0, 16.0, 23.0),   # requirement climbs again at high temperature
@@ -639,7 +707,10 @@ def scab_risk(days: List[DaySummary]) -> List[Alert]:
     c = CONFIG["scab_risk"]
     alerts: List[Alert] = []
     for d in days:
-        wet = d.leaf_wet_hours if d.leaf_wet_hours is not None else 0.0
+        # Mills needs CONTINUOUS wetness: prefer the cross-midnight contiguous run when we have
+        # hourly data, falling back to the daily wet-hour count only for sensor/direct input.
+        wet = (d.max_wet_run if d.max_wet_run is not None
+               else (d.leaf_wet_hours if d.leaf_wet_hours is not None else 0))
         if wet <= 0:
             continue
         bands = _scab_mills(d.mean_temp, c["upper_temp"])
@@ -656,7 +727,7 @@ def scab_risk(days: List[DaySummary]) -> List[Alert]:
         else:
             level, sevr = "light", Severity.WATCH
         alerts.append(Alert("scab_risk", sevr,
-            f"{level} scab-infection period ({d.date}): {wet:.0f}h leaf wetness at {T(d.mean_temp)} "
+            f"{level} scab-infection period ({d.date}): {wet:.0f}h continuous leaf wetness at {T(d.mean_temp)} "
             f"avg meets the revised-Mills {level.lower()} threshold ({light:.0f}/{mod:.0f}/{sev:.0f}h "
             f"for light/moderate/severe). Organic: sanitation is the main lever -- shred or remove "
             f"fallen leaves to cut overwintering ascospores, prune and space for fast drying, grow "
@@ -666,12 +737,58 @@ def scab_risk(days: List[DaySummary]) -> List[Alert]:
     return alerts
 
 
+@module("downy_mildew", "Grapevine downy mildew (Plasmopara viticola): 3-10 primary + secondary risk")
+def downy_mildew(days: List[DaySummary]) -> List[Alert]:
+    """Grapevine downy mildew (Plasmopara viticola) risk at daily resolution.
+
+    PRIMARY (oosporic) infection -- the classic Baldacci (1947) '3-10 rule': the season's first
+    primary infection needs all three of mean temp >= 10C, >= 10mm rain (over ~24-48h), and shoots
+    >= 10cm. We can see the two WEATHER conditions but not shoot length, so this fires as a WATCH
+    and says so -- it only matters once spring shoots have reached ~10cm.
+
+    SECONDARY infection -- once the disease is present, each wet, mild spell drives another cycle:
+    sporangia form and zoospores infect green tissue above ~13C (optimum 18-25C, stops ~30C) given
+    a leaf-wetness period (short when warm, longer when cool). Fires as a WARNING.
+
+    Daily proxy for an hourly model (Blaeser & Weltzien 1979; Caffi et al. 2016; Brischetto et al.
+    2021; OSU PLPATH-FRU-33). Organic-first advice: there is no organic cure once infected, so the
+    levers are cultural -- open the canopy, remove leaves/laterals for airflow, avoid overhead/late
+    irrigation that wets leaves, and grow resistant varieties; copper is the only organic protectant
+    and must be on the leaf BEFORE the wet period (see treatment_window for timing)."""
+    c = CONFIG["downy_mildew"]
+    alerts: List[Alert] = []
+    for d in days:
+        wet = d.max_wet_run if d.max_wet_run is not None else (d.leaf_wet_hours or 0)
+        # Secondary cycle: present disease + mild temperature + a leaf-wetness period.
+        if (c["secondary_temp_min"] <= d.mean_temp <= c["secondary_temp_max"]
+                and wet >= c["secondary_wet_hours"] and d.precip_mm > 0):
+            conf = "MEDIUM" if 18.0 <= d.mean_temp <= 25.0 else "LOW"
+            alerts.append(Alert("downy_mildew", Severity.WARNING,
+                f"Downy mildew secondary-infection conditions ({d.date}): {wet:.0f}h leaf wetness at "
+                f"{T(d.mean_temp)} (favourable 13-30C). If the disease is already in the block, this "
+                f"drives a new cycle. Organic: open the canopy and remove leaves for airflow, stop "
+                f"overhead/evening irrigation; copper only works if applied before the wetting.",
+                date=d.date, confidence=conf))
+        # Primary 3-10 rule: weather half (temp + rain); shoot length is the grower's to confirm.
+        elif d.mean_temp >= c["primary_temp"] and d.precip_mm >= c["primary_rain"]:
+            alerts.append(Alert("downy_mildew", Severity.WATCH,
+                f"Downy mildew primary-infection weather ({d.date}): mean {T(d.mean_temp)} and "
+                f"{R(d.precip_mm)} rain meet the 3-10 rule's weather part. Primary infection is "
+                f"possible IF spring shoots have reached ~10cm. Organic: ready cultural controls "
+                f"(canopy airflow, no overhead irrigation); pre-position copper if you use it.",
+                date=d.date, confidence="LOW"))
+    return alerts
+
+
 @module("frost_risk", "Frost and cold-stress danger zones")
 def frost_risk(days: List[DaySummary]) -> List[Alert]:
     c = CONFIG["frost_risk"]
     alerts: List[Alert] = []
     for d in days:
-        if d.min_temp <= c["frost"]:
+        if d.min_temp <= c["hard_frost"]:
+            alerts.append(Alert("frost_risk", Severity.DANGER,
+                f"HARD/killing frost ({T(d.min_temp)}): severe, even hardy crops at risk; protect everything.", date=d.date))
+        elif d.min_temp <= c["frost"]:
             alerts.append(Alert("frost_risk", Severity.DANGER,
                 f"Frost ({T(d.min_temp)}): protect tender crops/seedlings.", date=d.date))
         elif d.min_temp <= c["near_frost"]:
@@ -694,13 +811,16 @@ def heat_stress(days: List[DaySummary]) -> List[Alert]:
     return alerts
 
 
-# Per-species livestock profiles: THI heat thresholds (mild/moderate/severe) and cold-stress
-# 'feels-like' thresholds. Dairy cattle are the most heat-sensitive (lactation heat, THI onset
-# ~68); beef and sheep/goats are more heat-tolerant; pigs and poultry are very heat-sensitive
-# (no sweat glands). For cold, full-fleece sheep are hardy while pigs/poultry are cold-sensitive.
-# THI is best validated for ruminants; pig/poultry values are practical approximations.
-# Grounded in extension/peer sources; all calibratable. Shorn sheep and young stock are far more
-# vulnerable to cold than these woolly-adult defaults.
+# Per-species livestock profiles: heat thresholds (mild/moderate/severe) and cold-stress
+# 'feels-like' thresholds. Most species are graded on the NRC Temperature-Humidity Index (_thi):
+# dairy cattle most heat-sensitive (lactation heat, onset ~68); beef and sheep/goats more
+# tolerant. PIGS use the same NRC THI scale, but with the SWINE onset published by St-Pierre,
+# Cobanov & Schnitkey (2003): growing-finishing hogs 72, sows 74 (the moderate/severe bands are
+# interpolated, not published). POULTRY are different: birds cannot sweat and are graded on a
+# degC-scale poultry index (_poultry_thi, scale="poultry"), NOT the cattle NRC scale -- onset
+# ~28C (Tao & Xin 2003 broiler / Kim et al. 2020 layer). Mixing the two scales is the bug this
+# fixes. For cold, full-fleece sheep are hardy while pigs/poultry are cold-sensitive. Shorn sheep
+# and young stock are far more vulnerable to cold than these woolly-adult defaults. Calibratable.
 LIVESTOCK_PROFILES = {
     "dairy_cattle": {"label": "dairy cattle", "mild": 68.0, "moderate": 72.0, "severe": 80.0,
                      "cold_warning": -5.0,  "cold_severe": -15.0},
@@ -710,15 +830,25 @@ LIVESTOCK_PROFILES = {
                      "cold_warning": -15.0, "cold_severe": -25.0},
     "goat":         {"label": "goats",        "mild": 70.0, "moderate": 80.0, "severe": 88.0,
                      "cold_warning": -3.0,  "cold_severe": -12.0},
-    "pig":          {"label": "pigs",         "mild": 72.0, "moderate": 78.0, "severe": 82.0,
+    # Pigs: NRC THI scale, St-Pierre (2003) grow-finish hog onset 72 (mild); +4/+8 bands interpolated.
+    "pig":          {"label": "pigs",         "mild": 72.0, "moderate": 76.0, "severe": 80.0,
                      "cold_warning": 2.0,   "cold_severe": -8.0},
-    "poultry":      {"label": "poultry",      "mild": 74.0, "moderate": 80.0, "severe": 84.0,
+    # Sows: more heat-tolerant per St-Pierre's index (onset 74); separate option for breeding herds.
+    "sow":          {"label": "sows",         "mild": 74.0, "moderate": 78.0, "severe": 82.0,
+                     "cold_warning": 0.0,   "cold_severe": -10.0},
+    # Poultry: degC poultry-THI scale (NOT cattle NRC). Onset ~28C; mortality region ~32C+.
+    "poultry":      {"label": "poultry",      "scale": "poultry",
+                     "mild": 27.8, "moderate": 30.0, "severe": 32.0,
                      "cold_warning": 2.0,   "cold_severe": -6.0},
 }
 KEPT_LIVESTOCK = ["dairy_cattle"]   # which animals the grower keeps; set via --livestock
 
 
 def _kept_livestock():
+    for s in KEPT_LIVESTOCK:
+        if s not in LIVESTOCK_PROFILES:
+            print(f"WARNING: unknown livestock '{s}' ignored "
+                  f"(known: {', '.join(sorted(LIVESTOCK_PROFILES))}).", file=sys.stderr)
     p = [LIVESTOCK_PROFILES[s] for s in KEPT_LIVESTOCK if s in LIVESTOCK_PROFILES]
     return p or [LIVESTOCK_PROFILES["dairy_cattle"]]
 
@@ -781,16 +911,24 @@ def wind_conditions(days: List[DaySummary]) -> List[Alert]:
 
 @module("livestock_thi", "Livestock heat stress via Temperature-Humidity Index, per kept species")
 def livestock_thi(days: List[DaySummary]) -> List[Alert]:
-    """THI combines temperature and humidity into the standard heat-stress index. Thresholds are
-    per kept species (LIVESTOCK_PROFILES): dairy cattle most sensitive, beef and sheep/goats more
-    tolerant, pigs and poultry very sensitive. THI is best validated for ruminants; pig/poultry
-    thresholds are practical approximations. Set with --livestock."""
+    """Heat stress per kept species (LIVESTOCK_PROFILES), set with --livestock. Cattle, sheep,
+    goats and pigs are graded on the NRC Temperature-Humidity Index (pigs use St-Pierre's 2003
+    swine onsets on that same scale). Poultry are graded on a SEPARATE degC poultry index
+    (_poultry_thi) because birds cannot sweat and their published thresholds are in degC -- the
+    two indices are reported as distinct alerts and must not be compared."""
     profiles = _kept_livestock()
+    # Poultry are graded on a degC poultry index, every other species on the NRC THI -- the two
+    # scales are not comparable, so they are tracked and reported separately.
+    thi_profiles = [p for p in profiles if p.get("scale") != "poultry"]
+    poultry_profiles = [p for p in profiles if p.get("scale") == "poultry"]
     alerts: List[Alert] = []
+    thi_streak = poultry_streak = 0  # consecutive days at moderate+ heat (no overnight recovery)
     for d in days:
-        thi = _thi(d.max_temp, d.mean_rh)
+        # NRC THI species (cattle, sheep, goats, pigs). Use the day's true peak coincident-hour
+        # THI; fall back to (max_temp, mean_rh) only when hourly data isn't available.
+        thi = d.thi_max if d.thi_max is not None else _thi(d.max_temp, d.mean_rh)
         graded, worst = [], Severity.INFO
-        for p in profiles:
+        for p in thi_profiles:
             if thi >= p["severe"]:
                 lvl, sev = "severe", Severity.DANGER
             elif thi >= p["moderate"]:
@@ -802,15 +940,49 @@ def livestock_thi(days: List[DaySummary]) -> List[Alert]:
             graded.append((p["label"], lvl))
             if sev > worst:
                 worst = sev
-        if not graded:
-            continue
-        parts = "; ".join(f"{lvl} for {label}" for label, lvl in graded)
-        advice = ("Provide shade, water, airflow; avoid handling; risk to yield and welfare."
-                  if worst >= Severity.DANGER else
-                  "Ensure water and shade; handle in cool hours."
-                  if worst >= Severity.WARNING else "Watch vulnerable stock.")
-        alerts.append(Alert("livestock_thi", worst,
-            f"Heat stress (THI {thi:.0f}): {parts}. {advice}", date=d.date))
+        if graded:
+            thi_streak = thi_streak + 1 if worst >= Severity.WARNING else 0
+            parts = "; ".join(f"{lvl} for {label}" for label, lvl in graded)
+            advice = ("Provide shade, water, airflow; avoid handling; risk to yield and welfare."
+                      if worst >= Severity.DANGER else
+                      "Ensure water and shade; handle in cool hours."
+                      if worst >= Severity.WARNING else "Watch vulnerable stock.")
+            load = (f" Day {thi_streak} of sustained heat without a cool recovery day -- cumulative "
+                    f"stress builds; prioritise overnight cooling." if thi_streak >= 3 else "")
+            alerts.append(Alert("livestock_thi", worst,
+                f"Heat stress (THI {thi:.0f}): {parts}. {advice}{load}", date=d.date))
+        else:
+            thi_streak = 0
+        # Poultry on the degC poultry-THI scale (birds: no sweat glands, faster to die in heat).
+        if poultry_profiles:
+            pthi = _poultry_thi(d.max_temp, d.mean_rh)
+            pg, pworst = [], Severity.INFO
+            for p in poultry_profiles:
+                if pthi >= p["severe"]:
+                    lvl, sev = "severe", Severity.DANGER
+                elif pthi >= p["moderate"]:
+                    lvl, sev = "moderate", Severity.WARNING
+                elif pthi >= p["mild"]:
+                    lvl, sev = "mild", Severity.WATCH
+                else:
+                    continue
+                pg.append((p["label"], lvl))
+                if sev > pworst:
+                    pworst = sev
+            if pg:
+                poultry_streak = poultry_streak + 1 if pworst >= Severity.WARNING else 0
+                pparts = "; ".join(f"{lvl} for {label}" for label, lvl in pg)
+                padvice = ("Max ventilation/air speed, cool water, do not crowd: heat kills birds "
+                           "fast." if pworst >= Severity.DANGER else
+                           "Add ventilation and cool water; watch for open-beak panting."
+                           if pworst >= Severity.WARNING else "Watch birds for early panting.")
+                pload = (f" Day {poultry_streak} of sustained heat -- an ACUTE spike on top of this "
+                         f"is the deadliest case for poultry." if poultry_streak >= 3 else "")
+                alerts.append(Alert("livestock_thi", pworst,
+                    f"Poultry heat stress (poultry index {pthi:.0f}C): {pparts}. {padvice}{pload}",
+                    date=d.date))
+            else:
+                poultry_streak = 0
     return alerts
 
 
@@ -859,10 +1031,20 @@ def pollinators(days: List[DaySummary]) -> List[Alert]:
                 f"Cool (max {T(d.max_temp)}): too cold for {g}, but {a} still foraging.",
                 date=d.date))
             continue
-        if d.max_wind is not None and d.max_wind >= min(p["wind_stop"] for p in active):
-            alerts.append(Alert("pollinators", Severity.WATCH,
-                f"Strong wind ({W(d.max_wind)}) limits foraging.", date=d.date))
-            continue
+        if d.max_wind is not None:
+            wind_ok = [p for p in active if d.max_wind < p["wind_stop"]]
+            wind_stopped = [p for p in active if d.max_wind >= p["wind_stop"]]
+            if not wind_ok:                  # too windy for every active bee
+                alerts.append(Alert("pollinators", Severity.WATCH,
+                    f"Strong wind ({W(d.max_wind)}) limits foraging.", date=d.date))
+                continue
+            if wind_stopped:                 # some grounded by wind, hardier bees still fly
+                ws = ", ".join(p["label"] for p in wind_stopped)
+                wa = ", ".join(p["label"] for p in wind_ok)
+                alerts.append(Alert("pollinators", Severity.WATCH,
+                    f"Strong wind ({W(d.max_wind)}): too windy for {ws}, but {wa} still foraging.",
+                    date=d.date))
+                continue
         if all(d.max_temp < p["good_temp"] for p in active):
             alerts.append(Alert("pollinators", Severity.WATCH,
                 f"Marginal foraging (max {T(d.max_temp)}): reduced bee activity.", date=d.date))
@@ -870,14 +1052,23 @@ def pollinators(days: List[DaySummary]) -> List[Alert]:
         if d.max_temp > max(p["hot_ceiling"] for p in active):
             alerts.append(Alert("pollinators", Severity.WATCH,
                 f"Heat (max {T(d.max_temp)}) reduces midday foraging.", date=d.date))
+            continue
+        # Reaching here = a genuinely good window for every kept bee: warm enough, not too hot,
+        # calm, dry. Surface it as INFO so growers can TIME pollination-critical work (orchard
+        # bloom, caged/insect-pollinated crops), not just dodge the bad days.
+        a = ", ".join(p["label"] for p in active)
+        alerts.append(Alert("pollinators", Severity.INFO,
+            f"Good foraging window (max {T(d.max_temp)}, calm, dry): {a} active -- favourable "
+            f"for pollination-dependent bloom and open-flower field work.", date=d.date))
     return alerts
 
 
 @module("soil_conditions", "Soil water, oxygen and chemistry (from field sensors)")
 def soil_conditions(days: List[DaySummary]) -> List[Alert]:
     c = CONFIG["soil_conditions"]
-    chem_fields = ("soil_moisture", "soil_oxygen", "soil_nitrogen", "soil_phosphorus",
-                   "soil_potassium", "soil_ph", "soil_ec", "soil_organic_matter")
+    chem_fields = ("soil_moisture", "soil_oxygen", "soil_temp_min", "soil_nitrogen",
+                   "soil_phosphorus", "soil_potassium", "soil_ph", "soil_ec",
+                   "soil_organic_matter")
     alerts: List[Alert] = []
     latest = None
     for d in days:
@@ -907,6 +1098,21 @@ def soil_conditions(days: List[DaySummary]) -> List[Alert]:
             elif d.soil_oxygen <= c["reduced_o2"]:
                 alerts.append(Alert("soil_conditions", Severity.WARNING,
                     f"Reduced soil oxygen ({d.soil_oxygen:.0f}%).", date=d.date))
+        if d.soil_temp_min is not None:
+            st = d.soil_temp_min
+            if st <= c["soil_frozen"]:
+                alerts.append(Alert("soil_conditions", Severity.DANGER,
+                    f"Soil at/below freezing ({T(st)}): root-zone frost, no germination, frost-heave "
+                    f"risk. Hold planting; mulch to insulate; protect shallow roots.", date=d.date))
+            elif st < c["soil_cold_sow"]:
+                alerts.append(Alert("soil_conditions", Severity.WATCH,
+                    f"Cold soil ({T(st)}): too cold for most seed -- sowings will sit and rot rather "
+                    f"than sprout. Wait for warmer soil before sowing.", date=d.date))
+            elif st < c["soil_warm_sow"]:
+                alerts.append(Alert("soil_conditions", Severity.INFO,
+                    f"Soil {T(st)}: cool-season crops can be sown, but warm-season crops (maize, "
+                    f"beans, squash, tomato) need soil >= {T(c['soil_warm_sow'])} to germinate well.",
+                    date=d.date))
         if d.soil_ph is not None:
             if d.soil_ph < c["ph_acidic"]:
                 alerts.append(Alert("soil_conditions", Severity.WARNING,
@@ -952,6 +1158,7 @@ def soil_conditions(days: List[DaySummary]) -> List[Alert]:
     if latest:
         parts = []
         for label, attr, unit in (("moisture", "soil_moisture", "%"), ("O2", "soil_oxygen", "%"),
+                                  ("soil-temp-min", "soil_temp_min", "C"),
                                   ("pH", "soil_ph", ""), ("N", "soil_nitrogen", "ppm"),
                                   ("P", "soil_phosphorus", "ppm"), ("K", "soil_potassium", "ppm"),
                                   ("EC", "soil_ec", "dS/m"), ("OM", "soil_organic_matter", "%")):
@@ -1199,11 +1406,13 @@ def evapotranspiration(days: List[DaySummary]) -> List[Alert]:
     alerts: List[Alert] = []
     deficit = total_et = total_rain = 0.0
     state = "ok"
+    kc = c["kc"]
     for d in days:
         et0 = _et0_hargreaves(d.min_temp, d.max_temp, LATITUDE, _doy(d.date))
+        etc = et0 * kc  # crop water demand = reference ET0 x crop coefficient
         rain = d.precip_mm if d.precip_mm is not None else 0.0
-        deficit = max(0.0, deficit + et0 - rain)
-        total_et += et0
+        deficit = max(0.0, deficit + etc - rain)
+        total_et += etc
         total_rain += rain
         if deficit >= c["deficit_warning"] and state != "warning":
             alerts.append(Alert("evapotranspiration", Severity.WARNING,
@@ -1217,16 +1426,18 @@ def evapotranspiration(days: List[DaySummary]) -> List[Alert]:
                 f"plan to irrigate soon.", date=d.date))
             state = "watch"
         elif deficit < c["deficit_watch"] and state != "ok":
-            if rain > et0:
+            if rain > etc:
                 alerts.append(Alert("evapotranspiration", Severity.INFO,
                     f"Rain reset the water balance by {d.date} (deficit ~{R(deficit)}): hold "
                     f"irrigation.", date=d.date))
             state = "ok"
     if days:
+        hint = (f"(crop Kc {kc:g} applied)" if kc != 1.0
+                else "(multiply ET0 by crop Kc for crop-specific need)")
+        label = "crop ET" if kc != 1.0 else "reference ET0"
         alerts.append(Alert("evapotranspiration", Severity.INFO,
-            f"Crop water balance over {len(days)} days: {R(total_et)} reference ET0 demand vs "
-            f"{R(total_rain)} rain; net deficit ~{R(deficit)} (multiply ET0 by crop Kc for crop-"
-            f"specific need)."))
+            f"Crop water balance over {len(days)} days: {R(total_et)} {label} demand vs "
+            f"{R(total_rain)} rain; net deficit ~{R(deficit)} {hint}."))
     return alerts
 
 
@@ -1262,6 +1473,11 @@ KEPT_AQUACULTURE = ["mixed"]   # which farmed species; set via --aquaculture
 
 
 def _kept_aquaculture():
+    for s in KEPT_AQUACULTURE:
+        if s not in AQUACULTURE_PROFILES:
+            print(f"WARNING: unknown aquaculture species '{s}' ignored — falling back to "
+                  f"'mixed', which has NO temperature kill-limits "
+                  f"(known: {', '.join(sorted(AQUACULTURE_PROFILES))}).", file=sys.stderr)
     p = [AQUACULTURE_PROFILES[s] for s in KEPT_AQUACULTURE if s in AQUACULTURE_PROFILES]
     return p or [AQUACULTURE_PROFILES["mixed"]]
 
@@ -1276,6 +1492,7 @@ def marine_conditions(days: List[DaySummary]) -> List[Alert]:
     alerts: List[Alert] = []
     latest = None
     warm = False
+    prev_air_mean = None  # prior processed day's mean air temp, for cold-front turnover detection
     for d in days:
         if all(getattr(d, a) is None for a in water_fields):
             continue
@@ -1283,12 +1500,15 @@ def marine_conditions(days: List[DaySummary]) -> List[Alert]:
         warm = d.water_temp is not None and d.water_temp >= c["warm_water"]
         if d.dissolved_oxygen is not None:
             do = d.dissolved_oxygen
+            opt = c["do_optimum"]
             graded, worst = [], Severity.INFO
             for p in profiles:
                 if do < p["do_lethal"]:
                     lvl, sev = "lethal", Severity.DANGER
                 elif do < p["do_low"]:
                     lvl, sev = "stress", Severity.WARNING
+                elif do < opt and p["do_low"] < opt:
+                    lvl, sev = "below optimum", Severity.WATCH
                 else:
                     continue
                 graded.append((p["label"], lvl))
@@ -1296,31 +1516,49 @@ def marine_conditions(days: List[DaySummary]) -> List[Alert]:
                     worst = sev
             if graded:
                 parts = "; ".join(f"{lvl} for {label}" for label, lvl in graded)
+                # Express the reading against what the water can actually hold (warmer/saltier
+                # water holds less O2), and flag that DO bottoms out just before dawn.
+                sat = _do_saturation(d.water_temp, d.salinity) if d.water_temp is not None else None
+                satnote = f" -- {do / sat * 100:.0f}% of saturation" if sat and sat > 0 else ""
                 advice = ("Aerate now; cut feeding/stocking; move stock if you can."
                           if worst >= Severity.DANGER else
-                          "Check aeration, especially before dawn.")
+                          "Check aeration, especially before dawn (DO bottoms out at first light).")
                 alerts.append(Alert("marine_conditions", worst,
-                    f"Low dissolved oxygen ({do:.1f} mg/L): {parts}. {advice}", date=d.date))
+                    f"Low dissolved oxygen ({do:.1f} mg/L{satnote}): {parts}. {advice}", date=d.date))
         if d.water_ammonia is not None:
-            am = d.water_ammonia
-            tox = " Warm/alkaline water raises ammonia toxicity sharply." if warm else ""
+            am = d.water_ammonia  # total ammonia nitrogen (TAN), mg/L
             graded, worst = [], Severity.INFO
-            for p in profiles:
-                if am >= p["ammonia_danger"]:
-                    lvl, sev = "toxic", Severity.DANGER
-                elif am >= p["ammonia_warn"]:
-                    lvl, sev = "elevated", Severity.WARNING
-                else:
-                    continue
-                graded.append((p["label"], lvl))
-                if sev > worst:
-                    worst = sev
+            if d.water_ph is not None and d.water_temp is not None:
+                # Grade the TOXIC un-ionized form (NH3), not raw TAN. NH3's share of TAN
+                # is pH- and temperature-driven (Emerson 1975); pH is the dominant lever,
+                # so a high-pH pond is dangerous even at a modest total-ammonia reading.
+                nh3 = am * _nh3_fraction(d.water_temp, d.water_ph)
+                if nh3 >= 0.05:
+                    graded, worst = [("stock", "toxic")], Severity.DANGER
+                elif nh3 >= 0.02:
+                    graded, worst = [("stock", "elevated")], Severity.WARNING
+                detail = (f"NH3 {nh3:.3f} mg/L un-ionized (from {am:.2f} TAN at "
+                          f"pH {d.water_ph:.1f}, {T(d.water_temp)})")
+            else:
+                # No pH/temp: fall back to coarse per-species total-ammonia thresholds.
+                for p in profiles:
+                    if am >= p["ammonia_danger"]:
+                        lvl, sev = "toxic", Severity.DANGER
+                    elif am >= p["ammonia_warn"]:
+                        lvl, sev = "elevated", Severity.WARNING
+                    else:
+                        continue
+                    graded.append((p["label"], lvl))
+                    if sev > worst:
+                        worst = sev
+                detail = (f"total ammonia {am:.2f} mg/L (add pH + water_temp for true "
+                          f"NH3 toxicity; using coarse TAN thresholds)")
             if graded:
                 parts = "; ".join(f"{lvl} for {label}" for label, lvl in graded)
                 advice = ("Stop feeding; water change; boost aeration and biofiltration."
                           if worst >= Severity.DANGER else "Reduce feeding; check biofilter.")
                 alerts.append(Alert("marine_conditions", worst,
-                    f"Ammonia {am:.2f} mg/L: {parts}.{tox} {advice}", date=d.date))
+                    f"Ammonia: {detail}: {parts}. {advice}", date=d.date))
         if d.water_temp is not None:
             wt = d.water_temp
             graded, worst = [], Severity.INFO
@@ -1381,6 +1619,20 @@ def marine_conditions(days: List[DaySummary]) -> List[Alert]:
             alerts.append(Alert("marine_conditions", Severity.WARNING,
                 f"Warm water ({T(d.water_temp)}): lowers oxygen capacity and fuels blooms.",
                 date=d.date))
+        # Stratification turnover: a warm (stratified) pond that is suddenly mixed -- by heavy rain
+        # and runoff or a cold front -- can flip oxygen-dead bottom water to the surface, crashing
+        # whole-column DO and releasing H2S/ammonia. A classic, fast, whole-pond kill. Flag the
+        # RISK from the trigger; a post-event DO reading is what confirms an actual crash.
+        cold_front = (prev_air_mean is not None
+                      and (prev_air_mean - d.mean_temp) >= c["turnover_temp_drop"])
+        heavy_rain = d.precip_mm >= c["turnover_rain"]
+        if warm and (heavy_rain or cold_front):
+            trigger = "heavy rain and runoff" if heavy_rain else "a sharp drop in air temperature"
+            alerts.append(Alert("marine_conditions", Severity.WARNING,
+                f"Pond turnover risk ({d.date}): {trigger} on a warm, likely-stratified pond can "
+                f"mix oxygen-dead bottom water up and crash dissolved oxygen pond-wide -- a sudden "
+                f"kill risk. Run aerators, hold feeding, and check DO before dawn.", date=d.date))
+        prev_air_mean = d.mean_temp
     if latest:
         parts = []
         for label, attr, unit in (("DO", "dissolved_oxygen", " mg/L"), ("chl-a", "chlorophyll", " ug/L"),
