@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+Sixteenth module and a science-accuracy pass over the disease, livestock, and marine models.
+
+- **New module `downy_mildew`** (grapevine *Plasmopara viticola*): the primary "3-10 rule"
+  (temperature + rain half of the classic Baldacci criteria) plus the secondary wet-spell
+  infection cycle, with organic-first cultural advice.
+- **Cross-midnight leaf wetness:** contiguous wet spells are now tracked across calendar-day
+  boundaries (`max_wet_run`), so an overnight wetting no longer fragments below the scab/blight
+  infection thresholds -- a real missed-infection bug in the daily model.
+- **Apple scab:** finely-split cold-temperature bands from the published Mills-Jones table.
+- **Livestock heat stress:** poultry are now graded on a degC poultry index (wet-bulb based),
+  not the cattle NRC THI they can't be compared to; pigs use St-Pierre (2003) swine onsets; new
+  `sow` species; consecutive-heat-day streak tracking; warnings for unknown `--livestock` species.
+- **Aquaculture/marine:** un-ionized ammonia (NH3, Emerson 1975) graded instead of raw TAN;
+  dissolved oxygen reported as percent-of-saturation (Weiss 1970); new pond-turnover risk
+  (warm, stratified pond + heavy rain or a cold front).
+- **Soil:** root-zone temperature alerts (frozen / too-cold-to-sow / warm-enough-to-sow).
+- **Evapotranspiration:** crop coefficient (Kc) applied to reference ET0.
+- **Pollinators:** per-species wind thresholds, plus a positive "good foraging window" alert.
+- 138 tests pass (up from 129).
+
 ## 1.0.0 -- first public release
 TerraWard's first stable release: a free, open, organic-first farm early-warning engine.
 One Python file, zero dependencies, runs on a laptop or a Raspberry Pi. Fifteen risk

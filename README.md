@@ -96,6 +96,7 @@ terraward --parcels examples/sample_parcels.json --digest
 |---|---|---|
 | late_blight | Potato late blight (Hutton + Smith ensemble) | weather |
 | scab_risk | Apple-scab infection periods (revised Mills leaf-wetness model) | weather |
+| downy_mildew | Grapevine downy mildew (Plasmopara viticola): primary "3-10 rule" + secondary infection | weather |
 | frost_risk | Frost & cold stress for crops | weather |
 | heat_stress | Crop heat stress | weather |
 | cold_stress | Livestock cold stress (wind-chill + wet-coat), per species | weather |
@@ -251,7 +252,7 @@ verdicts.
 
 ## Roadmap
 
-**Done:** 15 modules (land + sea + livestock + pollinators + two disease models + named-pest phenology), a whole-farm multi-parcel view, the next-48h digest, ensemble confidence, the
+**Done:** 16 modules (land + sea + livestock + pollinators + three disease models + named-pest phenology), a whole-farm multi-parcel view, the next-48h digest, ensemble confidence, the
 trust/calibration loop, multi-source sensor import, open export, history, config layer, tests, and a deterministic AI briefing (Layer 1) with a grounding seam for a local model.
 
 **Planned:** wiring a local model into the advisor (Layer 2, grounded by the briefing so it can't hallucinate), a plain-language action calendar, satellite inputs, a neighbourhood outbreak map
