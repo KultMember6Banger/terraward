@@ -12,16 +12,25 @@ license = { text = "AGPL-3.0-only" }
 keywords = ["agriculture", "farming", "organic", "early-warning", "aquaculture", "decision-support"]
 authors = [{ name = "the TerraWard contributors" }]
 classifiers = [
-    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "License :: OSI Approved :: GNU Affero General Public License v3 (AGPLv3)",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering",
     "Operating System :: OS Independent",
 ]
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/KultMember6Banger/terraward"
+Repository = "https://github.com/KultMember6Banger/terraward"
+Changelog = "https://github.com/KultMember6Banger/terraward/blob/main/CHANGELOG.md"
+
 [project.scripts]
 terraward = "terraward:main"
+terraward-advisor = "advisor:_cli"
 
 [tool.setuptools]
-py-modules = ["terraward"]
+py-modules = ["terraward", "advisor"]

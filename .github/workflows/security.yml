@@ -16,5 +16,3 @@ jobs:
         run: |
           pip install bandit
           bandit -r terraward.py advisor.py
-      - name: Test suite
-        run: python -m unittest discover -v

@@ -34,7 +34,7 @@ VERSION HISTORY:
           the same trust/calibration loop. No vision model is bundled (keeps the
           core dependency-free); a real model plugs in via @detector. See README.
         * Data sovereignty: the engine is local-first with no telemetry and no
-          account. See DATA_POLICY.md. Your data is yours, never sold or shared
+          account. See DATA_GOVERNANCE.md. Your data is yours, never sold or shared
           with third parties; grower-to-grower sharing is opt-in only.
   v0.9 SPECIES PROFILES + UNITS + MANURE:
         * Species-aware livestock (--livestock), bees (--bees) and aquaculture
