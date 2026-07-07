@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "terraward"
-version = "1.0.0"
+version = "1.1.0"
 description = "A free, open, organic-first early-warning system for farmers, across land and sea."
 readme = "README.md"
 requires-python = ">=3.8"

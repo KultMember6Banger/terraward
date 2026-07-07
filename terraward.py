@@ -90,6 +90,18 @@ VERSION HISTORY:
         * Opportunity finders (treatment_window, manure good-window) now look forward from today, so
           they stop reporting a window that is already in the past when history is included.
         * Renderers no longer crash on an empty window (defensive guard).
+  v1.1 GRAPE DISEASE + MODEL ACCURACY:
+        * New module downy_mildew: grapevine downy mildew (Plasmopara viticola) -- the primary
+          '3-10 rule' (temperature + rain) plus the secondary wet-spell infection cycle, organic
+          cultural controls first (copper only if on the leaf before the wetting).
+        * Leaf wetness is now tracked as a CONTIGUOUS run across midnight (max_wet_run), so an
+          overnight wetting no longer fragments below the scab/blight infection thresholds.
+        * Livestock: poultry graded on a degC poultry index (wet-bulb), not the cattle NRC THI;
+          pigs use St-Pierre (2003) swine onsets; new 'sow' species; sustained-heat streaks.
+        * Marine: un-ionized ammonia (NH3, Emerson 1975) instead of raw TAN; dissolved oxygen as
+          percent-of-saturation (Weiss 1970); pond-turnover risk (warm pond + rain/cold front).
+        * Soil root-zone temperature alerts; crop coefficient (Kc) in evapotranspiration;
+          per-species pollinator wind thresholds plus a positive good-foraging-window alert.
 
 Adding a capability = write ONE function and tag it @module(...).
 Action layer is ORGANIC: no synthetic-chemical recommendations, ever.
@@ -203,7 +215,7 @@ def load_config(path: str) -> None:
 # DATA LAYER
 # ============================================================================
 
-VERSION = "1.0"  # single source of truth for the runtime version (keep pyproject.toml in step)
+VERSION = "1.1"  # single source of truth for the runtime version (keep pyproject.toml in step)
 __version__ = VERSION
 DEFAULT_LAT, DEFAULT_LON, DEFAULT_NAME = 50.93, 4.33, "Meise"
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"

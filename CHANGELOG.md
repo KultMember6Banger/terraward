@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 -- 2026-07-07
 Sixteenth module and a science-accuracy pass over the disease, livestock, and marine models.
 
 - **New module `downy_mildew`** (grapevine *Plasmopara viticola*): the primary "3-10 rule"
